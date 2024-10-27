@@ -1,0 +1,2324 @@
+desgoblin{
+    -->game_system{
+        ->main.py:
+        ->menu.py:
+    }
+    -->battle_system{
+        ->main_battlesys:
+        ->battlesys:
+        ->character:
+        ->enemy:
+        ->weapon: 
+        ->item: 
+        ->healthbar:
+    }
+    -->map_system{
+        ->main:
+        ->map:
+        ->tiles:
+    }
+}
+
+
+desgoblin{
+    -->game_system{
+
+
+        ->main.py:
+
+import sys
+import os
+import random
+import pygame
+
+# Adding paths for imports
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from game_system.menu import handle_menu_input
+from battle_system.battlesys import BattleSystem
+from battle_system.hero import Hero
+from battle_system.enemy import generate_boss, boss_list
+from battle_system.health_bar import HealthBar
+from battle_system.item import *
+from battle_system.weapon import Weapon, generate_weapon, low_tier_weapons, mid_tier_weapons, high_tier_weapons
+from map_system.map import Map, shrine_tile
+from map_system.tiles import *
+
+class Game:
+    """Main Game class to manage game flow and state."""
+    MAX_SEED_VALUE = 1000000  # Maximum integer value allowed for seed
+    SCREEN_WIDTH = 800
+    SCREEN_HEIGHT = 600
+
+    # UI area dimensions
+    MAP_AREA_WIDTH = SCREEN_WIDTH // 2  # Left half for map
+    MAP_AREA_HEIGHT = SCREEN_HEIGHT * 2 // 3  # Top two-thirds for map
+
+    STATS_AREA_X = MAP_AREA_WIDTH
+    STATS_AREA_Y = 0
+    STATS_AREA_WIDTH = SCREEN_WIDTH - MAP_AREA_WIDTH
+    STATS_AREA_HEIGHT = MAP_AREA_HEIGHT
+
+    TEXTBOX_AREA_X = 0
+    TEXTBOX_AREA_Y = MAP_AREA_HEIGHT
+    TEXTBOX_AREA_WIDTH = SCREEN_WIDTH
+    TEXTBOX_AREA_HEIGHT = SCREEN_HEIGHT - MAP_AREA_HEIGHT
+
+    TILE_SIZE = 16  # Adjusted tile size for better visibility
+
+    def __init__(self, screen=None):
+        if screen is None:
+            pygame.init()
+            self.screen = pygame.display.set_mode((self.SCREEN_WIDTH, self.SCREEN_HEIGHT))
+        else:
+            self.screen = screen
+
+        self.running = True
+        self.map_width = 30
+        self.map_height = 15
+
+        self.hero = Hero(name="Hero", health=150)
+        self.hero.health_bar = HealthBar(self.hero, color="green")
+        self.current_village_tile = None
+        self.cycle = 1
+        self.boss_defeated = 0
+        self.game_over_count = {}
+
+        pygame.init()
+        self.screen = pygame.display.set_mode((self.SCREEN_WIDTH, self.SCREEN_HEIGHT))
+        pygame.display.set_caption("Chronicles of Desgoblin")
+        self.clock = pygame.time.Clock()
+
+        # Load assets
+        load_tile_images()
+        load_enemy_images()
+
+        self.font = pygame.font.Font(None, 24)
+        self.log_messages = []
+        self.current_input = ''
+        self.accepting_input = False
+        self.in_battle = False
+
+        # Initialize flags for different inputs
+        self.awaiting_loot_input = False
+        self.awaiting_inventory_input = False
+        self.awaiting_village_input = False
+        self.awaiting_rest_input = False
+        self.awaiting_weapon_shop_input = False
+        self.awaiting_item_shop_input = False
+
+        # For treasure encounters
+        self.loot_weapon = None
+        self.replace_treasure_tile = None
+
+    def run(self) -> None:
+        """Runs the main game loop, offering options for new game or seed-based game."""
+        while True:
+            # Handle menu input
+            menu_choice = handle_menu_input()
+            if menu_choice == "1":  # New game
+                self.seed = random.randint(0, self.MAX_SEED_VALUE)
+                self.start_game()
+            elif menu_choice == "2":  # Options -> Set Seed Game
+                self.set_seed()
+                self.start_game()
+            elif menu_choice == "3":  # Exit
+                break
+
+    def set_seed(self):
+        """Sets a seed value for the map, with validation for the seed range."""
+        while True:
+            try:
+                seed_input = int(input(f"Enter seed (0 - {self.MAX_SEED_VALUE}): "))
+                if 0 <= seed_input <= self.MAX_SEED_VALUE:
+                    self.seed = seed_input
+                    break
+                else:
+                    print(f"Please enter a value between 0 and {self.MAX_SEED_VALUE}.")
+            except ValueError:
+                print("Invalid input. Please enter an integer.")
+
+    def start_game(self, new_game=True):
+        """Starts a new game or level, resetting the map with a seed instead of reinitializing it."""
+        if new_game:
+            self.hero = Hero(name="Hero", health=150)
+            self.hero.health_bar = HealthBar(self.hero, color="green")
+            self.boss_defeated = 0
+            self.cycle = 1
+            self.seed = random.randint(0, self.MAX_SEED_VALUE)
+
+        # Initialize or reset the map
+        self.game_map = Map(self.screen, width=self.map_width, height=self.map_height, seed=self.seed)
+        self.game_map.place_player(self.hero)
+
+        # Select and place enemies
+        selected_enemies = self.game_map.select_enemies(self.boss_defeated, self.cycle)
+        self.game_map.place_enemies_on_map(selected_enemies)
+
+        self.total_bosses = 1  # Total bosses to defeat
+
+        # Main game loop
+        self.game_loop()
+
+    def game_loop(self):
+        """Main game loop using Pygame."""
+        while self.running:
+            for event in pygame.event.get():
+                if event.type == pygame.QUIT:
+                    print("Quit event received.")
+                    self.running = False
+                    pygame.quit()
+                    sys.exit()
+                elif event.type == pygame.KEYDOWN:
+                    self.handle_key_event(event)
+
+            self.display_ui()
+            self.clock.tick(60)  # Limit to 60 FPS
+
+            # Check if boss is defeated
+            if self.boss_defeated >= self.total_bosses:
+                self.display_final_victory_screen()
+                break
+
+    def handle_key_event(self, event):
+        """Handles key events for player movement and actions."""
+        if self.accepting_input:
+            if event.key == pygame.K_RETURN:
+                user_input = self.current_input
+                self.current_input = ''
+                if self.in_battle:
+                    self.process_battle_input(user_input)
+                else:
+                    self.process_user_input(user_input)
+            elif event.key == pygame.K_BACKSPACE:
+                self.current_input = self.current_input[:-1]
+            else:
+                self.current_input += event.unicode
+        else:
+            x, y = self.hero.player_pos
+            new_x, new_y = x, y
+
+            if event.key == pygame.K_w:
+                new_x = max(0, x - 1)
+            elif event.key == pygame.K_s:
+                new_x = min(self.game_map.height - 1, x + 1)
+            elif event.key == pygame.K_a:
+                new_y = max(0, y - 1)
+            elif event.key == pygame.K_d:
+                new_y = min(self.game_map.width - 1, y + 1)
+            elif event.key == pygame.K_i:
+                self.access_inventory()
+                return
+            elif event.key == pygame.K_q:
+                print("Quitting game...")
+                self.running = False
+                pygame.quit()
+                sys.exit()
+            else:
+                return  # Ignore other keys
+
+            self.move_player(new_x - x, new_y - y)
+
+    def move_player(self, dx, dy):
+        """Moves the player and handles encounters."""
+        x, y = self.hero.player_pos
+        new_x, new_y = x + dx, y + dy
+
+        # Validate movement within map bounds
+        if new_x < 0 or new_x >= self.game_map.height or new_y < 0 or new_y >= self.game_map.width:
+            self.log_messages.append("Invalid move. Stay within bounds.")
+            return
+
+        # Get the tile at the new position
+        tile = self.game_map.map_data[new_x][new_y]
+        tile_symbol = tile.symbol_raw
+
+        # Modular encounter system using a dictionary of encounters
+        encounter_handlers = {
+            'E': lambda: self.enemy_encounter(new_x, new_y),
+            'S': lambda: self.shrine_encounter(new_x, new_y),
+            '~': lambda: self.invalid_move(),
+            '#': lambda: self.invalid_move(),
+            'N': lambda: self.npc_encounter(new_x, new_y),
+            'V': lambda: self.village_encounter(new_x, new_y),
+            'T': lambda: self.treasure_encounter(new_x, new_y),
+        }
+
+        moved = False
+
+        if tile_symbol in encounter_handlers:
+            moved = encounter_handlers[tile_symbol]()
+        else:
+            # Move the player
+            self.game_map.update_player_position(x, y, new_x, new_y)
+            self.hero.player_pos = (new_x, new_y)
+            moved = True
+
+    def access_inventory(self):
+        """Allows the player to view and use items from their inventory."""
+        self.log_messages.append("Inventory:")
+        for idx, item in enumerate(self.hero.items, 1):
+            self.log_messages.append(f"{idx}. {item.name} - {item.description}")
+        self.log_messages.append("Type the number of the item to use it, or 'b' to go back.")
+        self.accepting_input = True
+        self.awaiting_inventory_input = True
+
+    def process_user_input(self, user_input):
+        """Processes user input when not in battle."""
+        if self.awaiting_inventory_input:
+            if user_input.lower() == 'b':
+                self.accepting_input = False
+                self.awaiting_inventory_input = False
+            elif user_input.isdigit():
+                idx = int(user_input) - 1
+                if 0 <= idx < len(self.hero.items):
+                    item = self.hero.items.pop(idx)
+                    self.log_messages.append(f"You used {item.name}.")
+                    # Implement item effects here
+                    item.use(self.hero)
+                else:
+                    self.log_messages.append("Invalid item number.")
+            else:
+                self.log_messages.append("Invalid input.")
+        else:
+            self.log_messages.append("No action to process.")
+            self.accepting_input = False
+
+    def enemy_encounter(self, x, y):
+        """Handles encounters with enemies."""
+        enemy = self.game_map.map_data[x][y].enemy
+        if enemy:
+            self.log_messages.append(f"Enemy encountered: {enemy.name}")
+            self.battle_loop(enemy)
+            if not self.hero.alive:
+                self.handle_game_over()
+                return False
+            if not enemy.alive:
+                self.log_messages.append(f"You have defeated the {enemy.name}!")
+                # Remove enemy from the tile
+                self.game_map.map_data[x][y].enemy = None
+                self.game_map.enemies.remove(enemy)
+                self.handle_loot(enemy)
+                # Move the player onto the enemy's position
+                self.game_map.update_player_position(self.hero.player_pos[0], self.hero.player_pos[1], x, y)
+                self.hero.player_pos = (x, y)
+                return True
+            else:
+                return False
+        else:
+            self.log_messages.append("Error: Enemy not found at this position.")
+            return False
+
+    def handle_loot(self, enemy):
+        """Handles looting after defeating an enemy."""
+        # Handle random item drop
+        item = self.enemy_drop_item(enemy)
+        if item:
+            self.log_messages.append(f"The enemy dropped {item.name}!")
+            self.hero.items.append(item)
+        else:
+            self.log_messages.append("The enemy did not drop any items.")
+
+        # Weapon loot
+        self.log_messages.append(f"You found {enemy.weapon.name} (Tier: {enemy.tier.capitalize()}) (Damage: {enemy.weapon.damage}). Value: {enemy.weapon.value} gold.")
+        self.log_messages.append("Do you want to pick it up or scrap it for gold? (p/s)")
+        self.accepting_input = True
+        self.awaiting_loot_input = True
+        self.loot_weapon = enemy.weapon
+
+    def process_user_input(self, user_input):
+        """Processes user input when not in battle."""
+        if self.awaiting_loot_input:
+            if user_input.lower() == 'p':
+                self.log_messages.append(f"You picked up {self.loot_weapon.name}.")
+                self.hero.equip_weapon(self.loot_weapon)
+                self.loot_weapon = None
+                self.accepting_input = False
+                self.awaiting_loot_input = False
+            elif user_input.lower() == 's':
+                self.log_messages.append(f"Scrapped {self.loot_weapon.name} for {self.loot_weapon.value} gold.")
+                self.hero.cashpile += self.loot_weapon.value
+                self.log_messages.append(f"Your cashpile now contains {self.hero.cashpile} gold.")
+                self.loot_weapon = None
+                self.accepting_input = False
+                self.awaiting_loot_input = False
+            else:
+                self.log_messages.append("Invalid input. Please enter 'p' or 's'.")
+        elif self.awaiting_inventory_input:
+            if user_input.lower() == 'b':
+                self.accepting_input = False
+                self.awaiting_inventory_input = False
+            elif user_input.isdigit():
+                idx = int(user_input) - 1
+                if 0 <= idx < len(self.hero.items):
+                    item = self.hero.items.pop(idx)
+                    self.log_messages.append(f"You used {item.name}.")
+                    item.use(self.hero)
+                else:
+                    self.log_messages.append("Invalid item number.")
+            else:
+                self.log_messages.append("Invalid input.")
+        else:
+            self.log_messages.append("No action to process.")
+            self.accepting_input = False
+
+    def enemy_drop_item(self, enemy):
+        """Determines if an enemy drops an item and returns it."""
+        if random.randint(1, 100) <= 50:
+            return generate_cure("small")
+        else:
+            return None
+
+    def shrine_encounter(self, x, y):
+        """Handles the shrine encounter leading to a boss battle."""
+        self.log_messages.append("You have discovered the shrine!")
+    
+        # Generate the boss based on the current cycle and boss defeated count
+        boss = generate_boss(self.boss_defeated % len(boss_list))
+    
+        # Start the boss battle
+        self.battle_loop(boss)  # Pass the generated boss as argument
+
+        # Handle the outcome of the boss battle
+        if not self.hero.alive:
+            self.handle_game_over()
+            return False
+        if not boss.alive:
+            self.log_messages.append(f"You have defeated {boss.name}!")
+            # Handle boss drops
+            for item_name in boss.drops:
+                item = create_item_from_name(item_name)
+                self.hero.items.append(item)
+                self.log_messages.append(f"You received {item.name}!")
+            self.boss_defeated += 1
+            self.display_level_up_message()
+            self.start_new_level()  # Start the next level after defeating the boss
+            return True
+
+        return False
+
+    def invalid_move(self):
+        """Handles attempts to move to invalid tiles."""
+        self.log_messages.append("You cannot move there.")
+        return False
+
+    def village_encounter(self, x, y):
+        """Handles encounters with villages."""
+        self.log_messages.append("You enter a village.")
+        self.village_menu()
+        self.game_map.update_player_position(self.hero.player_pos[0], self.hero.player_pos[1], x, y)
+        self.hero.player_pos = (x, y)
+        return True
+
+    def village_menu(self):
+        """Displays the village menu and handles interactions."""
+        self.log_messages.append("Welcome to the village!")
+        self.log_messages.append("1. Rest")
+        self.log_messages.append("2. Visit Weapon Shop")
+        self.log_messages.append("3. Visit Item Shop")
+        self.log_messages.append("4. Leave Village")
+        self.accepting_input = True
+        self.awaiting_village_input = True
+
+    def process_user_input(self, user_input):
+        """Processes user input when not in battle."""
+        if self.awaiting_village_input:
+            if user_input == '1':
+                self.rest_menu()
+            elif user_input == '2':
+                self.weapon_shop()
+            elif user_input == '3':
+                self.item_shop()
+            elif user_input == '4':
+                self.log_messages.append("Leaving the village.")
+                self.accepting_input = False
+                self.awaiting_village_input = False
+            else:
+                self.log_messages.append("Invalid choice. Try again.")
+        elif self.awaiting_rest_input:
+            self.handle_rest_input(user_input)
+        elif self.awaiting_weapon_shop_input:
+            self.handle_weapon_shop_input(user_input)
+        elif self.awaiting_item_shop_input:
+            self.handle_item_shop_input(user_input)
+        else:
+            self.log_messages.append("No action to process.")
+            self.accepting_input = False
+
+    def rest_menu(self):
+        """Displays rest options in the village."""
+        self.log_messages.append("Resting Options:")
+        self.log_messages.append("1. Stanza Lercia (30% HP for 15 gold)")
+        self.log_messages.append("2. Stanza (50% HP for 25 gold)")
+        self.log_messages.append("3. Stanza Pregio (100% HP for 35 gold)")
+        self.accepting_input = True
+        self.awaiting_rest_input = True
+
+    def handle_rest_input(self, user_input):
+        """Handles rest option input."""
+        if user_input == '1' and self.hero.cashpile >= 15:
+            heal_amount = int(self.hero.health_max * 0.3)
+            self.hero.health = min(self.hero.health + heal_amount, self.hero.health_max)
+            self.hero.cashpile -= 15
+            self.log_messages.append("You rested badly in a Stanza Lercia and healed 30% of your HP.")
+        elif user_input == '2' and self.hero.cashpile >= 25:
+            heal_amount = int(self.hero.health_max * 0.5)
+            self.hero.health = min(self.hero.health + heal_amount, self.hero.health_max)
+            self.hero.cashpile -= 25
+            self.log_messages.append("You rested in a Stanza and healed 50% of your HP.")
+        elif user_input == '3' and self.hero.cashpile >= 35:
+            self.hero.health = self.hero.health_max
+            self.hero.cashpile -= 35
+            self.log_messages.append("You rested well in a Stanza Pregio and healed completely.")
+        else:
+            self.log_messages.append("You don't have enough gold for this option.")
+        self.accepting_input = False
+        self.awaiting_rest_input = False
+
+    def weapon_shop(self):
+        """Handles the weapon shop interactions."""
+        self.log_messages.append("Welcome to the Weapon Shop!")
+        # Generate weapons for sale
+        self.weapons_for_sale = (
+            [generate_weapon("low") for _ in range(5)] +
+            [generate_weapon("mid") for _ in range(4)] +
+            [generate_weapon("high") for _ in range(2)]
+        )
+        # Display available weapons
+        for idx, weapon in enumerate(self.weapons_for_sale, 1):
+            self.log_messages.append(f"{idx}. {weapon.name} (Tier: {weapon.tier.capitalize()}) - Damage: {weapon.damage} - {weapon.value} gold")
+        self.log_messages.append("Select a weapon to buy or 'b' to go back:")
+        self.accepting_input = True
+        self.awaiting_weapon_shop_input = True
+
+    def handle_weapon_shop_input(self, user_input):
+        """Handles weapon shop input."""
+        if user_input.isdigit():
+            idx = int(user_input) - 1
+            if 0 <= idx < len(self.weapons_for_sale):
+                weapon = self.weapons_for_sale[idx]
+                if self.hero.cashpile >= weapon.value:
+                    self.hero.cashpile -= weapon.value
+                    self.hero.equip_weapon(weapon)
+                    self.log_messages.append(f"You bought and equipped {weapon.name}.")
+                else:
+                    self.log_messages.append("You don't have enough gold.")
+            else:
+                self.log_messages.append("Invalid selection.")
+            self.accepting_input = False
+            self.awaiting_weapon_shop_input = False
+        elif user_input.lower() == 'b':
+            self.accepting_input = False
+            self.awaiting_weapon_shop_input = False
+        else:
+            self.log_messages.append("Invalid input.")
+
+    def item_shop(self):
+        """Handles the item shop interactions."""
+        self.log_messages.append("Welcome to the Item Shop!")
+        # Generate items for sale
+        self.items_for_sale = [
+            generate_cure("small"),
+            generate_cure("mids"),
+            generate_cure("midh"),
+            generate_throwable("small"),
+            generate_throwable("mids")
+        ]
+        # Display available items
+        for idx, item in enumerate(self.items_for_sale, 1):
+            self.log_messages.append(f"{idx}. {item.name} - {item.description} - {item.value} gold")
+        self.log_messages.append("Select an item to buy or 'b' to go back:")
+        self.accepting_input = True
+        self.awaiting_item_shop_input = True
+
+    def handle_item_shop_input(self, user_input):
+        """Handles item shop input."""
+        if user_input.isdigit():
+            idx = int(user_input) - 1
+            if 0 <= idx < len(self.items_for_sale):
+                item = self.items_for_sale[idx]
+                if self.hero.cashpile >= item.value:
+                    self.hero.cashpile -= item.value
+                    self.hero.items.append(item)
+                    self.log_messages.append(f"You bought {item.name}.")
+                else:
+                    self.log_messages.append("You don't have enough gold.")
+            else:
+                self.log_messages.append("Invalid selection.")
+            self.accepting_input = False
+            self.awaiting_item_shop_input = False
+        elif user_input.lower() == 'b':
+            self.accepting_input = False
+            self.awaiting_item_shop_input = False
+        else:
+            self.log_messages.append("Invalid input.")
+
+    def treasure_encounter(self, x, y):
+        """Handles encounters with treasures."""
+        self.log_messages.append("You found a treasure chest!")
+        weapon_tier = None
+        random_roll = random.randint(1, 100)
+        if random_roll <= 60:
+            weapon_tier = "low"
+        elif random_roll <= 90:
+            weapon_tier = "mid"
+        else:
+            weapon_tier = "high"
+
+        # Generate a weapon if the tier is determined
+        if weapon_tier:
+            weapon = generate_weapon(weapon_tier)
+            self.log_messages.append(f"You found a {weapon.name} (Tier: {weapon_tier.capitalize()})!")
+            self.log_messages.append("Do you want to pick it up or scrap it for gold? (p/s)")
+            self.accepting_input = True
+            self.awaiting_loot_input = True
+            self.loot_weapon = weapon
+            # Store the coordinates to update the tile later
+            self.replace_treasure_tile = (x, y)
+        else:
+            self.log_messages.append("You found no valuable weapons.")
+            # Directly replace the treasure tile with the empty treasure tile
+            self.game_map.map_data[x][y] = treasure_empty
+
+        # Move the player onto the treasure tile
+        self.game_map.update_player_position(self.hero.player_pos[0], self.hero.player_pos[1], x, y)
+        self.hero.player_pos = (x, y)
+
+        return False  # Player does not move until decision is made
+
+    def process_user_input(self, user_input):
+        """Processes user input when not in battle."""
+        if self.awaiting_loot_input:
+            if user_input.lower() == 'p':
+                # Player chooses to pick up the weapon
+                self.log_messages.append(f"You picked up {self.loot_weapon.name}.")
+                self.hero.equip_weapon(self.loot_weapon)
+                self.loot_weapon = None
+                self.accepting_input = False
+                self.awaiting_loot_input = False
+                # Replace the treasure tile after the player decision
+                if self.replace_treasure_tile:
+                    x, y = self.replace_treasure_tile
+                    self.game_map.map_data[x][y] = treasure_empty
+                    self.replace_treasure_tile = None
+            elif user_input.lower() == 's':
+                # Player chooses to scrap the weapon for gold
+                self.log_messages.append(f"Scrapped {self.loot_weapon.name} for {self.loot_weapon.value} gold.")
+                self.hero.cashpile += self.loot_weapon.value
+                self.log_messages.append(f"Your cashpile now contains {self.hero.cashpile} gold.")
+                self.loot_weapon = None
+                self.accepting_input = False
+                self.awaiting_loot_input = False
+                # Replace the treasure tile after the player decision
+                if self.replace_treasure_tile:
+                    x, y = self.replace_treasure_tile
+                    self.game_map.map_data[x][y] = treasure_empty
+                    self.replace_treasure_tile = None
+            else:
+                self.log_messages.append("Invalid input. Please enter 'p' or 's'.")
+        elif self.awaiting_inventory_input:
+            # Handle inventory interactions as before
+            if user_input.lower() == 'b':
+                self.accepting_input = False
+                self.awaiting_inventory_input = False
+            elif user_input.isdigit():
+                idx = int(user_input) - 1
+                if 0 <= idx < len(self.hero.items):
+                    item = self.hero.items.pop(idx)
+                    self.log_messages.append(f"You used {item.name}.")
+                    item.use(self.hero)
+                else:
+                    self.log_messages.append("Invalid item number.")
+            else:
+                self.log_messages.append("Invalid input.")
+        elif self.awaiting_village_input:
+            # Handle village menu interactions as before
+            self.handle_village_input(user_input)
+        elif self.awaiting_rest_input:
+            self.handle_rest_input(user_input)
+        elif self.awaiting_weapon_shop_input:
+            self.handle_weapon_shop_input(user_input)
+        elif self.awaiting_item_shop_input:
+            self.handle_item_shop_input(user_input)
+        else:
+            self.log_messages.append("No action to process.")
+            self.accepting_input = False
+
+    def update_treasure_tile(self, x, y):
+        """Updates the map after interacting with the treasure tile."""
+        # Replace the treasure tile with the empty treasure tile and move the player
+        self.game_map.map_data[x][y] = treasure_empty
+        self.game_map.update_player_position(self.hero.player_pos[0], self.hero.player_pos[1], x, y)
+        self.hero.player_pos = (x, y)
+        # Reset input flags
+        self.accepting_input = False
+        self.awaiting_treasure_input = False
+    
+    def boss_encounter(self, x, y):
+        """Handles encounters with bosses."""
+        self.log_messages.append("You have encountered a boss!")
+    
+        # Generate the boss
+        boss = generate_boss(self.boss_defeated % len(boss_list))
+    
+        # Start the boss battle
+        self.battle_loop(boss)
+
+        # Handle outcomes
+        if not self.hero.alive:
+            self.handle_game_over()
+            return False
+
+        if not boss.alive:
+            self.log_messages.append(f"You have defeated {boss.name}!")
+            # Handle boss drops
+            for item_name in boss.drops:
+                item = create_item_from_name(item_name)
+                self.hero.items.append(item)
+                self.log_messages.append(f"You received {item.name}!")
+
+            # Mark boss defeated and increase game difficulty
+            self.boss_defeated += 1
+            self.display_level_up_message()
+            self.start_new_level()
+            return True
+    
+        return False
+
+    def display_final_victory_screen(self):
+        """Displays the final victory screen."""
+        self.log_messages.append("Congratulations! You have defeated all the bosses and completed the game!")
+        self.running = False
+
+    def handle_game_over(self):
+        """Handles the game-over logic."""
+        self.log_messages.append("Game Over!")
+        self.running = False
+
+    def display_level_up_message(self):
+        """Displays a message after defeating a boss."""
+        self.log_messages.append(f"You have defeated {self.boss_defeated} out of {self.total_bosses} bosses.")
+        if self.boss_defeated < self.total_bosses:
+            self.log_messages.append("Prepare yourself for the next challenge!")
+        else:
+            self.log_messages.append("Congratulations! You have defeated all the bosses!")
+        # No need for input; proceed automatically
+
+    def start_new_level(self):
+        """Starts a new level with increased difficulty."""
+        self.cycle += 1
+        self.log_messages.append(f"Starting New Game+{self.cycle}")
+        self.seed = random.randint(0, self.MAX_SEED_VALUE)
+        self.log_messages.append(f"Generating new map with seed: {self.seed}")
+        self.start_game(new_game=False)
+
+    def battle_loop(self, enemy):
+        """Handles the battle loop."""
+        self.in_battle = True
+        self.accepting_input = True
+        self.current_input = ''
+        self.battle_log = []
+
+        while self.in_battle:
+            for event in pygame.event.get():
+                if event.type == pygame.QUIT:
+                    self.in_battle = False
+                    self.running = False
+                    pygame.quit()
+                    sys.exit()
+                elif event.type == pygame.KEYDOWN:
+                    self.handle_battle_key_event(event)
+
+            self.display_battle_ui(enemy)
+            self.clock.tick(60)
+
+            # Enemy's turn if battle is still ongoing
+            if self.in_battle:
+                enemy_action = enemy.choose_action()  # Get the enemy's action
+                if enemy_action == 'attack':
+                    damage = enemy.attack(self.hero)
+                    self.battle_log.append(f"The {enemy.name} attacks you for {damage} damage!")
+                    if not self.hero.alive:
+                        self.battle_log.append("You have been defeated!")
+                        self.in_battle = False
+                        self.accepting_input = False
+
+    def handle_battle_key_event(self, event):
+        """Handles key events during battle."""
+        if event.key == pygame.K_RETURN:
+            user_input = self.current_input
+            self.current_input = ''
+            self.process_battle_input(user_input)
+        elif event.key == pygame.K_BACKSPACE:
+            self.current_input = self.current_input[:-1]
+        else:
+            self.current_input += event.unicode
+
+    def process_battle_input(self, user_input):
+        """Processes user input during battle."""
+        action = user_input.lower()
+        if action == 'attack':
+            # Hero attacks enemy
+            damage = self.hero.attack(enemy)
+            self.battle_log.append(f"You attack the {enemy.name} for {damage} damage!")
+            if not enemy.alive:
+                self.battle_log.append(f"You defeated the {enemy.name}!")
+                self.in_battle = False
+                self.accepting_input = False
+        elif action == 'defend':
+            # Hero defends
+            self.battle_log.append("You brace yourself for the next attack.")
+        elif action == 'item':
+            # Use an item
+            self.battle_log.append("You use an item.")
+        elif action == 'run':
+            # Attempt to escape
+            self.battle_log.append("You attempt to run away.")
+            self.in_battle = False
+            self.accepting_input = False
+        else:
+            self.battle_log.append("Invalid action. Choose 'attack', 'defend', 'item', or 'run'.")
+
+        # Enemy's turn if battle is still ongoing
+        if self.in_battle:
+            enemy_action = self.enemy.choose_action()
+            if enemy_action == 'attack':
+                damage = self.enemy.attack(self.hero)
+                self.battle_log.append(f"The {enemy.name} attacks you for {damage} damage!")
+                if not self.hero.alive:
+                    self.battle_log.append("You have been defeated!")
+                    self.in_battle = False
+                    self.accepting_input = False
+
+    def display_ui(self):
+        """Displays the entire UI including map, stats, and text box."""
+        self.screen.fill((0, 0, 0))
+
+        # Draw map area
+        map_rect = pygame.Rect(0, 0, self.MAP_AREA_WIDTH, self.MAP_AREA_HEIGHT)
+        self.game_map.draw(self.screen)
+
+        # Draw stats area
+        stats_rect = pygame.Rect(self.STATS_AREA_X, self.STATS_AREA_Y, self.STATS_AREA_WIDTH, self.STATS_AREA_HEIGHT)
+        pygame.draw.rect(self.screen, (50, 50, 50), stats_rect)
+        y_offset = self.STATS_AREA_Y + 10
+        line_height = 24
+
+        # Display hero stats
+        stats_texts = [
+            f"Name: {self.hero.name}",
+            f"HP: {self.hero.health}/{self.hero.health_max}",
+            f"Weapon: {self.hero.weapon.name if self.hero.weapon else 'None'}",
+            f"Damage: {self.hero.weapon.damage if self.hero.weapon else 'N/A'}",
+            f"Cash: {self.hero.cashpile} gold",
+            "Inventory:"
+        ]
+        for stat in stats_texts:
+            stat_surface = self.font.render(stat, True, (255, 255, 255))
+            self.screen.blit(stat_surface, (self.STATS_AREA_X + 10, y_offset))
+            y_offset += line_height
+
+        # Display inventory items
+        max_inventory_items_display = 5
+        for idx, item in enumerate(self.hero.items[:max_inventory_items_display]):
+            item_text = f"- {item.name}"
+            item_surface = self.font.render(item_text, True, (255, 255, 255))
+            self.screen.blit(item_surface, (self.STATS_AREA_X + 20, y_offset))
+            y_offset += line_height
+
+        if len(self.hero.items) > max_inventory_items_display:
+            more_items_text = f"...and {len(self.hero.items) - max_inventory_items_display} more items"
+            more_items_surface = self.font.render(more_items_text, True, (255, 255, 255))
+            self.screen.blit(more_items_surface, (self.STATS_AREA_X + 20, y_offset))
+            y_offset += line_height
+
+        # Draw text box area
+        text_box_rect = pygame.Rect(self.TEXTBOX_AREA_X, self.TEXTBOX_AREA_Y, self.TEXTBOX_AREA_WIDTH, self.TEXTBOX_AREA_HEIGHT)
+        pygame.draw.rect(self.screen, (100, 100, 100), text_box_rect)
+
+        # Display logs in the text box
+        line_height = 20
+        max_log_lines = int(self.TEXTBOX_AREA_HEIGHT / line_height) - 1
+        log_start_index = max(0, len(self.log_messages) - max_log_lines)
+        y_offset = self.TEXTBOX_AREA_Y + 5
+        for log_message in self.log_messages[log_start_index:]:
+            log_surface = self.font.render(log_message, True, (255, 255, 255))
+            self.screen.blit(log_surface, (self.TEXTBOX_AREA_X + 5, y_offset))
+            y_offset += line_height
+
+        # Display input prompt or current input
+        input_prompt = "> " + self.current_input
+        input_surface = self.font.render(input_prompt, True, (255, 255, 255))
+        self.screen.blit(input_surface, (self.TEXTBOX_AREA_X + 5, self.TEXTBOX_AREA_Y + self.TEXTBOX_AREA_HEIGHT - line_height - 5))
+
+        pygame.display.flip()
+
+    def display_battle_ui(self, enemy):
+        """Displays the battle UI with sprites, health bars, and labels for the hero and enemy."""
+        self.screen.fill((0, 0, 0))
+
+        font = pygame.font.Font(None, 24)
+        sprite_size = 100
+        line_height = 24
+
+        # Hero section
+        hero_x, hero_y = 50, 150
+        health_bar_width = 150
+
+        if self.hero.sprite:
+            hero_sprite = pygame.transform.scale(self.hero.sprite, (sprite_size, sprite_size))
+            self.screen.blit(hero_sprite, (hero_x, hero_y))
+
+        hero_health_ratio = self.hero.health / self.hero.health_max
+        hero_health_bar_rect = pygame.Rect(hero_x, hero_y - 40, int(health_bar_width * hero_health_ratio), 15)
+        pygame.draw.rect(self.screen, (0, 255, 0), hero_health_bar_rect)
+        pygame.draw.rect(self.screen, (255, 0, 0), pygame.Rect(hero_x + int(health_bar_width * hero_health_ratio), hero_y - 40, int(health_bar_width * (1 - hero_health_ratio)), 15))
+
+        hero_label = font.render("Hero", True, (255, 255, 255))
+        self.screen.blit(hero_label, (hero_x, hero_y - 60))
+
+        # Enemy section
+        enemy_x, enemy_y = self.SCREEN_WIDTH - sprite_size - 50, 150
+
+        if enemy.sprite:
+            enemy_sprite = pygame.transform.scale(enemy.sprite, (sprite_size, sprite_size))
+            self.screen.blit(enemy_sprite, (enemy_x, enemy_y))
+
+        enemy_health_ratio = enemy.health / enemy.health_max
+        enemy_health_bar_rect = pygame.Rect(enemy_x, enemy_y - 40, int(health_bar_width * enemy_health_ratio), 15)
+        pygame.draw.rect(self.screen, (0, 255, 0), enemy_health_bar_rect)
+        pygame.draw.rect(self.screen, (255, 0, 0), pygame.Rect(enemy_x + int(health_bar_width * enemy_health_ratio), enemy_y - 40, int(health_bar_width * (1 - enemy_health_ratio)), 15))
+
+        enemy_label = font.render(enemy.name, True, (255, 255, 255))
+        self.screen.blit(enemy_label, (enemy_x, enemy_y - 60))
+
+        # Battle options
+        text_box_rect = pygame.Rect(0, self.SCREEN_HEIGHT // 2, self.SCREEN_WIDTH, self.SCREEN_HEIGHT // 2)
+        pygame.draw.rect(self.screen, (100, 100, 100), text_box_rect)
+
+        options = [
+            "Battle Moves: ",
+            "Attack (a)",
+            "Skills (s)",
+            "Item (i)",
+            "Escape (e)"
+        ]
+        y_offset = self.SCREEN_HEIGHT // 2 + 10
+        for option in options:
+            option_surface = font.render(option, True, (255, 255, 255))
+            self.screen.blit(option_surface, (10, y_offset))
+            y_offset += line_height
+
+        max_log_lines = 6
+        log_start_index = max(0, len(self.battle_log) - max_log_lines)
+        y_offset = self.SCREEN_HEIGHT // 2 + 120
+        for log_message in self.battle_log[log_start_index:]:
+            log_surface = font.render(log_message, True, (255, 255, 255))
+            self.screen.blit(log_surface, (10, y_offset))
+            y_offset += line_height
+
+        input_prompt = "> " + self.current_input
+        input_surface = font.render(input_prompt, True, (255, 255, 255))
+        self.screen.blit(input_surface, (10, self.SCREEN_HEIGHT - 40))
+
+        pygame.display.flip()
+
+if __name__ == "__main__":
+    pygame.init()
+    screen = pygame.display.set_mode((Game.SCREEN_WIDTH, Game.SCREEN_HEIGHT))
+    game = Game(screen=screen)
+    game.run()
+
+
+        ->menu.py:
+
+# game_system/menu.py
+
+import pygame
+import sys
+import os
+
+# Initialize Pygame font
+pygame.font.init()
+
+def handle_menu_input():
+    """Handles menu input using Pygame with a framerate limit."""
+    menu_running = True
+    clock = pygame.time.Clock()  # Create a clock for controlling framerate
+
+    while menu_running:
+        # Fill screen with background color
+        pygame.display.get_surface().fill((100, 100, 100))  # Changed to a shade of gray for visibility
+
+        # Display menu options
+        font = pygame.font.Font(None, 36)
+        menu_text = [
+            "1. New Game",
+            "2. Set Seed Game",
+            "3. Exit"
+        ]
+        y = 150
+        for line in menu_text:
+            text_surface = font.render(line, True, (255, 255, 255))
+            pygame.display.get_surface().blit(text_surface, (100, y))
+            y += 50
+
+        pygame.display.flip()  # Update the display
+
+        # Handle events
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                pygame.quit()
+                sys.exit()
+            elif event.type == pygame.KEYDOWN:
+                if event.key == pygame.K_1:
+                    return "1"
+                elif event.key == pygame.K_2:
+                    return "2"
+                elif event.key == pygame.K_3:
+                    return "3"
+
+        # Limit the framerate to avoid excessive CPU usage
+        clock.tick(30)  # Limit to 30 frames per second
+
+    }
+    -->battle_system{
+
+        ->battlesys:
+
+# battle_system/battlesys.py
+
+import random
+import os, sys
+import pygame
+from battle_system.hero import Hero
+from battle_system.enemy import Enemy
+from battle_system.health_bar import HealthBar
+from battle_system.item import *
+
+class BattleSystem:
+    """Class to manage battles between the hero and enemies."""
+
+    def __init__(self, hero: Hero, enemy: Enemy):
+        self.hero = hero
+        self.enemy = enemy
+        self.running = True
+        self.battle_log = []  # Initialize battle log
+
+        # Initialize Pygame if not already initialized
+        if not pygame.get_init():
+            pygame.init()
+
+        self.screen = pygame.display.set_mode((800, 600))
+        pygame.display.set_caption("Battle")
+
+        self.clock = pygame.time.Clock()
+
+        # Load fonts
+        self.font = pygame.font.SysFont('Arial', 20)
+        self.font_large = pygame.font.SysFont('Arial', 30)
+
+        # Load images
+        assets_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'assets', 'png')
+        self.hero_image = pygame.image.load(os.path.join(assets_dir, 'player.png')).convert_alpha()
+        self.enemy_image = pygame.image.load(os.path.join(assets_dir, f"{self.enemy.tier}_enemy.png")).convert_alpha()
+
+        # Scale images
+        self.hero_image = pygame.transform.scale(self.hero_image, (128, 128))
+        self.enemy_image = pygame.transform.scale(self.enemy_image, (128, 128))
+
+    def start_battle(self):
+        """Starts the battle loop."""
+        self.hero.health_bar.update()
+        self.enemy.health_bar.update()
+
+        while self.running and self.hero.alive and self.enemy.alive:
+            self.handle_events()
+            self.update()
+            self.draw()
+            self.clock.tick(60)
+
+        if not self.hero.alive:
+            self.battle_log.append("You have been defeated! Game Over.")
+            self.running = False
+            # Handle game over logic
+        elif not self.enemy.alive:
+            self.battle_log.append(f"{self.enemy.name} has been defeated!")
+            experience_gained = self.calculate_experience(self.enemy)
+            self.hero.gain_experience(experience_gained)
+            self.running = False
+
+    def handle_events(self):
+        """Handles Pygame events during battle."""
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                self.running = False
+                pygame.quit()
+                sys.exit()
+            elif event.type == pygame.KEYDOWN:
+                if event.key == pygame.K_a:
+                    self.attack()
+                    if self.enemy.alive:
+                        self.enemy_attack()
+                elif event.key == pygame.K_s:
+                    self.use_skill()
+                elif event.key == pygame.K_i:
+                    self.use_item()
+                elif event.key == pygame.K_e:
+                    if self.escape():
+                        self.running = False
+
+    def update(self):
+        """Updates game state."""
+        pass  # For now, no additional state to update
+
+    def draw(self):
+        """Draws the battle screen."""
+        self.screen.fill((0, 0, 0))  # Clear screen
+
+        # Draw hero
+        self.screen.blit(self.hero_image, (100, 250))
+        self.hero.health_bar.draw(self.screen, (100, 220))
+        hero_name_text = self.font_large.render(self.hero.name, True, (255, 255, 255))
+        self.screen.blit(hero_name_text, (100, 190))
+
+        # Draw enemy
+        self.screen.blit(self.enemy_image, (500, 100))
+        self.enemy.health_bar.draw(self.screen, (500, 70))
+        enemy_name_text = self.font_large.render(self.enemy.name, True, (255, 255, 255))
+        self.screen.blit(enemy_name_text, (500, 40))
+
+        # Draw battle log
+        y_offset = 450
+        for log_entry in self.battle_log[-5:]:
+            log_text = self.font.render(log_entry, True, (255, 255, 255))
+            self.screen.blit(log_text, (50, y_offset))
+            y_offset += 20
+
+        # Draw instructions
+        instructions = self.font.render("Press 'A' to Attack, 'S' for Skills, 'I' for Items, 'E' to Escape", True, (255, 255, 0))
+        self.screen.blit(instructions, (50, 20))
+
+        pygame.display.flip()
+
+    def attack(self):
+        """Handles the hero's attack action."""
+        damage_info = self.hero.attack(self.enemy)
+        self.battle_log.append(damage_info)
+
+    def use_skill(self):
+        """Handles the hero's skill usage."""
+        self.battle_log.append("Skills are under development.")
+
+    def use_item(self):
+        """Handles the hero using an item."""
+        if not self.hero.items:
+            self.battle_log.append("You have no items to use.")
+            return
+
+        # For simplicity, we'll use the first item
+        item = self.hero.items.pop(0)
+        if isinstance(item, Cure):
+            item.use(self.hero)
+        elif isinstance(item, Throwable):
+            item.use(self.enemy)
+        self.battle_log.append(f"You used {item.name}.")
+
+    def escape(self):
+        """Attempts to escape from the battle."""
+        escape_chance = {"low": 60, "mid": 40, "high": 20}
+        chance = escape_chance.get(self.enemy.tier, 0)
+        if random.randint(1, 100) <= chance:
+            self.battle_log.append("Escape successful!")
+            return True
+        else:
+            self.battle_log.append("Escape failed!")
+            self.enemy_attack()
+            return False
+
+    def enemy_attack(self):
+        """Handles the enemy's attack action."""
+        damage_info = self.enemy.attack(self.hero)
+        self.battle_log.append(damage_info)
+
+    def calculate_experience(self, enemy):
+        """Calculates experience gained from defeating an enemy."""
+        tier_experience = {"low": 50, "mid": 100, "high": 200}
+        return tier_experience.get(enemy.tier, 0)
+
+        ->character:
+
+# battle_system/character.py
+
+import pygame
+import random
+from abc import ABC
+from typing import Tuple, TYPE_CHECKING
+
+from battle_system.weapon import Weapon, generate_weapon
+from battle_system.health_bar import HealthBar
+
+if TYPE_CHECKING:
+    from battle_system.enemy import Enemy
+    from battle_system.hero import Hero
+
+
+class Character(ABC):
+    """Base class for all characters in the game."""
+
+    counter_ch: int = 20  # Counter-attack chance percentage
+
+    def __init__(self, name: str, health: int, evade_ch: int, crit_ch: int, armor: int) -> None:
+        self.name = name
+        self.health = health
+        self.health_max = health
+        self.evade_ch = evade_ch  # Evade chance percentage
+        self.crit_ch = crit_ch  # Critical hit chance percentage
+        self.armor = armor  # Damage reduction
+        self.weapon = generate_weapon("low")  # Default weapon
+        self.health_bar = HealthBar(self, color=(0, 255, 0))  # Default health bar color
+
+    @property
+    def alive(self) -> bool:
+        """Returns True if the character is alive."""
+        return self.health > 0
+
+    def attack(self, target: 'Character', attack_type="normal", is_counter: bool = False) -> str:
+        """Performs an attack on the target."""
+        messages = []
+
+        if not self.alive:
+            messages.append(f"{self.name} cannot attack because they are defeated.")
+            return "\n".join(messages)
+
+        if self.roll_event(target.evade_ch):
+            messages.append(f"{target.name} evaded the attack!")
+            return "\n".join(messages)
+
+        base_damage = self.calculate_base_damage(attack_type)
+        damage_after_crit, crit_message = self.deal_crit(base_damage)
+        if crit_message:
+            messages.append(crit_message)
+        final_damage = max(damage_after_crit - target.armor, 1)
+
+        target.take_damage(final_damage)
+        messages.append(f"{self.name} attacked {target.name} with {self.weapon.name} for {final_damage} damage.")
+
+        # Counter-attack logic
+        if not is_counter and target.alive and self.roll_event(target.counter_ch):
+            messages.append(f"{target.name} initiated a counter-attack!")
+            counter_attack_info = target.attack(self, is_counter=True)
+            messages.append(counter_attack_info)
+
+        return "\n".join(messages)
+
+    def calculate_base_damage(self, attack_type="normal") -> int:
+        """Calculates base damage based on attack type."""
+        min_damage = int(self.weapon.damage * 0.6) if attack_type == "quick" else int(self.weapon.damage * 0.8)
+        max_damage = int(self.weapon.damage * 1.5) if attack_type == "heavy" else int(self.weapon.damage * 1.2)
+        if max_damage <= min_damage:
+            max_damage = min_damage + 1
+        return random.randint(min_damage, max_damage)
+
+    @staticmethod
+    def roll_event(chance: int) -> bool:
+        """Determines if an event occurs based on chance percentage."""
+        return random.randint(1, 100) <= chance
+
+    def deal_crit(self, base_damage: int) -> Tuple[int, str]:
+        """Calculates critical hit damage."""
+        if self.roll_event(self.crit_ch):
+            crit_damage = int(base_damage * 1.5)
+            crit_message = f"Critical hit! {self.name} deals {crit_damage} damage!"
+            return crit_damage, crit_message
+        return base_damage, ""
+
+    def take_damage(self, damage: int) -> None:
+        """Applies damage to the character."""
+        self.health -= damage
+        self.health = max(self.health, 0)
+        self.health_bar.update()
+
+        ->enemy:
+
+# battle_system/enemy.py
+
+from random import choice, randint
+import pygame
+import os
+import random
+
+from battle_system.character import Character
+from battle_system.weapon import Weapon, generate_weapon
+from battle_system.item import create_item_from_name
+from battle_system.health_bar import HealthBar
+
+enemy_names = {
+    "low": [
+        "Slime", "Rat", "Goblin", "Spider", "Bat", "Snake", "Kobold", "Imp", "Bandit",
+        "Skeleton", "Zombie", "Giant Rat", "Cave Beetle", "Mud Crab", "Shadow Cat", "Wild Dog",
+        "Giant Centipede", "Boggart", "Mimicling", "Pixie", "Grelling", "Dust Mephit", "Giant Spider",
+        "Stirge", "Ghoul", "Darkling", "Wisp", "Crowfolk", "Carrion Beetle", "Vermling", "Giant Ant",
+        "Kappa", "Mud Elemental", "Scavenger", "Fire Beetle", "Crimson Bat", "Hagling", "Feral Boar",
+        "Dire Rabbit", "Raven", "Young Harpy", "Wood Sprite", "Giant Snail", "Frost Beetle", "Shade",
+        "Cursed Doll", "Gloomling", "Thornling", "Drudge", "Forest Imp", "Scarecrow", "Gutter Rat",
+        "Young Basilisk", "Giant Leech", "Dark Fairy", "Ash Crawler", "Thieving Monkey", "Dire Mole",
+        "Muck Dweller", "Fungal Sprite", "Will-o'-Rat", "Briar Beast", "Rusted Automaton", "Rotten Hound",
+        "Pond Scum", "Grave Mite", "Lesser Djinn", "Hedge Gremlin", "Nettle Stalker", "Wicker Man",
+        "Black Cat", "Lesser Kobold", "Gloom Bat", "Mist Lurker", "Bog Imp", "Weasel", "Hedgehog",
+        "Ragged Ghoul", "Young Hobgoblin", "Firefly Swarm", "Ashen Wisp", "Plague Rat", "Grotto Crab",
+        "Dire Toad", "Crag Lizard", "Bramble Elemental", "Shadow Hare", "Sewer Slime", "Wild Goat",
+        "Rubble Sprite", "Rock Grub", "Night Roach", "Giant Worm", "Lost Soul", "Gutter Snipe",
+        "Broken Puppet"
+    ],
+    "mid": [
+        "Big Goblin", "Hobgoblin", "Orc", "Gnoll", "Wight", "Troll", "Ogre", "Minotaur", "Centaur",
+        "Werewolf", "Harpy", "Griffon", "Cyclops", "Gargoyle", "Rakshasa", "Sea Hag", "Doppelganger",
+        "Dark Knight", "Redcap", "Chimera", "Banshee", "Dire Wolf", "Will-o'-Wisp", "Revenant", "Barghest",
+        "Manticore", "Gorgon", "Siren", "Dryad", "Basilisk", "Cursed Armor", "Grendel", "Bone Naga",
+        "Keres", "Anubian Guardian", "Fomorian", "Kelpie", "Wendigo", "Blood Hunter", "Nymph", "Spriggan",
+        "Werebear", "Wyrmling", "Shadow Mastiff", "Peryton", "Phantom Knight", "Headless Horseman",
+        "Sand Wraith", "Storm Elemental", "Spectral Archer", "Voidwalker", "Night Hag", "Ghoul Lord",
+        "Moroi", "Ghul", "Stone Golem", "Hellhound", "Ashen Revenant", "Pit Fiendling", "Fire Djinn",
+        "Crocotta", "Ceryneian Hind", "Myrmidon", "Bog Witch", "Fiery Salamander", "Onyx Gargoyle",
+        "Frost Troll", "Infernal Imp", "Cave Troll", "Sewer King", "Giant Scorpion", "Silverback Ape",
+        "Myrkalfar", "Black Annis", "Ash Wraith", "Desert Ghoul", "Clockwork Soldier", "Vodyanoi",
+        "Rusalka", "Draugr", "Half-Orc Brute", "Hill Giant", "Fenrir Pup", "Marble Statue", "Bugbear",
+        "Horned Devil", "Spectral Swordsman", "Harlequin Shade", "Cacodaemon", "Gloom Weaver",
+        "Blood Shade", "Black Knight"
+    ],
+    "high": [
+        "Wyvern", "Drake", "Titan", "Lich", "Vampire", "Dragon", "Behemoth", "Balor", "Kraken",
+        "Nightmare", "Elder Brain", "Shoggoth", "Star Spawn", "Demon Lord", "Pit Fiend", "Moloch",
+        "Hydra", "Hellhound Alpha", "Aboleth", "Elder Deep One", "Phoenix", "Archdemon", "Leviathan",
+        "Seraphim", "Bone Dragon", "Storm Giant", "Sphinx", "Charybdis", "Scylla", "Thanatos",
+        "Hecatoncheires", "Tarrasque", "Frost Wyrm", "Chernobog", "Anubis", "Fenrir", "Jormungandr",
+        "Nemean Lion", "Yamata-no-Orochi", "Ifrit", "Djinn Lord", "Nephilim", "Archon", "Astaroth",
+        "Beelzebub", "Belial", "Asmodeus", "Lilith", "Ziz", "Mammon", "Azazel", "Bael", "Qliphoth Beast",
+        "The Black Goat", "Great Unclean One", "Prince of Darkness", "Yaldabaoth", "Abyssal Wyrm",
+        "Ereshkigal", "Vritra", "Kali", "Garuda", "Ravana", "The Morrigan", "Baphomet", "Chimera Prime",
+        "Typhon", "Echidna", "Pontianak", "Black Tortoise", "Gugalanna", "Zuul", "Kukulkan", "The Erlking",
+        "Archlich", "Death Knight", "Lord of Change", "Archfiend", "Ashura", "Demogorgon", "Nyarlathotep",
+        "Ithaqua", "Yog-Sothoth", "Cthulhu", "Apep", "Set", "Geryon", "Aegir", "Kronos", "Hyperion",
+        "Atlas", "The Sorrow", "Father of Serpents", "Celestial Dragon", "The Devourer", "The False Prophet"
+    ]
+}
+
+class Enemy(Character):
+    """Enemy characters controlled by the game."""
+
+    def __init__(self, name: str, health: int, weapon: Weapon, evade_ch: int, crit_ch: int, armor: int, tier: str) -> None:
+        super().__init__(name=name, health=health, evade_ch=evade_ch, crit_ch=crit_ch, armor=armor)
+        self.weapon = weapon
+        self.health_bar = HealthBar(self, color=(255, 0, 0))
+        self.tier = tier  # Enemy's tier (low, mid, high)
+        self.pos = None  # Position on the map
+        self.underlying_tile = None  # Tile beneath the enemy (for map updates)
+
+        assets_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'assets', 'png')
+        
+        enemy_image_name = f"{self.tier}_enemy.png"
+        image_path = os.path.join(assets_dir, enemy_image_name)
+
+        TILE_SIZE = 16
+
+        # Load the enemy sprite image based on the tier
+        assets_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'assets', 'png')
+        enemy_image_name = f"{self.tier}_enemy.png"
+        image_path = os.path.join(assets_dir, enemy_image_name)
+
+        if os.path.exists(image_path):
+            self.image = pygame.image.load(image_path).convert_alpha()
+            self.image = pygame.transform.scale(self.image, (TILE_SIZE, TILE_SIZE))  # Scale to tile size
+        else:
+            print(f"Warning: Enemy image file {enemy_image_name} not found.")
+            # Use a placeholder image if the specific enemy image is missing
+            self.image = pygame.Surface((32, 32))
+            self.image.fill((255, 0, 255))  # Use magenta color to indicate missing texture
+
+    def set_position(self, x: int, y: int, underlying_tile):
+        """Sets the enemy's position on the map."""
+        self.pos = (x, y)
+        self.underlying_tile = underlying_tile
+
+    def drop_loot(self):
+        """Defines the loot dropped by the enemy upon defeat."""
+        return self.weapon
+
+    def scale_stats(self, multiplier):
+        """Scales the enemy's stats by the given multiplier."""
+        self.health = int(self.health * multiplier)
+        self.health_max = self.health
+        self.weapon.damage = int(self.weapon.damage * multiplier)
+        self.armor = int(self.armor * multiplier)
+
+
+def generate_enemy(tier: str, cycle: int = 0) -> Enemy:
+    """Generates an enemy based on the specified tier."""
+    names = enemy_names.get(tier)
+    if not names:
+        raise ValueError("Invalid tier for enemy generation")
+    name = choice(names)
+    health_ranges = {
+        "low": (10, 30),
+        "mid": (40, 80),
+        "high": (80, 120)
+    }
+    evade_ch_ranges = {
+        "low": (0, 5),
+        "mid": (5, 10),
+        "high": (10, 15)
+    }
+    crit_ch_ranges = {
+        "low": (5, 8),
+        "mid": (8, 12),
+        "high": (12, 20)
+    }
+    armor_ranges = {
+        "low": (0, 2),
+        "mid": (2, 6),
+        "high": (6, 12)
+    }
+
+    # Assign initial values
+    health = randint(*health_ranges[tier])
+    evade_ch = randint(*evade_ch_ranges[tier])
+    crit_ch = randint(*crit_ch_ranges[tier])
+    armor = randint(*armor_ranges[tier])
+
+
+     # Scale stats based on cycle
+    health = int(health * (1 + 0.2 * cycle))
+    evade_ch = int(evade_ch * (1 + 0.1 * cycle))
+    crit_ch = int(crit_ch * (1 + 0.1 * cycle))
+    armor = int(armor * (1 + 0.1 * cycle))
+    weapon = generate_weapon(tier, cycle)
+    # Create the enemy with adjusted stats
+    enemy = Enemy(
+        name=name,
+        health=health,
+        weapon=weapon,
+        evade_ch=evade_ch,
+        crit_ch=crit_ch,
+        armor=armor,
+        tier=tier
+    )
+    # Set image filename for the enemy based on tier
+    enemy.image_filename = f"{tier}_enemy.png"
+    return enemy
+
+
+
+class Boss(Enemy):
+    """Boss characters with special abilities."""
+
+    def __init__(self, name, health, weapon, evade_ch, crit_ch, armor, tier, skills, drops):
+        super().__init__(name, health, weapon, evade_ch, crit_ch, armor, tier)
+        self.skills = skills
+        self.drops = drops
+
+        # Load boss sprite
+        try:
+            self.sprite = pygame.image.load('assets/png/boss_enemy.png')  # Update path if needed
+        except FileNotFoundError:
+            print("Warning: Boss sprite not found. Using default placeholder.")
+            self.sprite = None
+
+    def choose_action(self):
+        """Chooses an action for the boss to take."""
+        # For now, the boss only attacks
+        actions = ["attack"]  # You can expand this list to include more actions like 'skill' in the future
+        return random.choice(actions)
+
+    def take_damage(self, damage):
+        """Reduces the boss's health by the specified damage."""
+        self.health -= damage
+        if self.health <= 0:
+            self.health = 0
+            self.alive = False
+
+boss_list = [
+    {
+        'name': 'Dragon Lord',
+        'health': 300,
+        'weapon': Weapon(name='Flame Breath', weapon_type='natural', damage=50),
+        'evade_ch': 10,
+        'crit_ch': 20,
+        'armor': 15,
+        'tier': 'boss',
+        'skills': ['Firestorm', 'Tail Swipe'],
+        'drops': ['Legendary Sword', 'Dragon Scale']
+    },
+    # Define other bosses similarly...
+]
+
+def generate_boss(boss_index):
+    """Generates a boss based on the index in the boss list."""
+    boss_data = boss_list[boss_index]
+    boss = Boss(
+        name=boss_data['name'],
+        health=boss_data['health'],
+        weapon=boss_data['weapon'],
+        evade_ch=boss_data['evade_ch'],
+        crit_ch=boss_data['crit_ch'],
+        armor=boss_data['armor'],
+        tier=boss_data['tier'],
+        skills=boss_data['skills'],
+        drops=boss_data['drops']
+    )
+    return boss
+
+        ->weapon: 
+
+# battle_system/weapon.py
+import pygame
+import os
+from random import randint, choice
+
+
+
+
+
+
+class Weapon:
+    """A class representing a weapon."""
+
+    def __init__(self, name: str, weapon_type: str, damage: int = 0, value: int = 0, tier: str = "low", cycle: int = 0) -> None:
+        self.name = name
+        self.weapon_type = weapon_type
+        self.damage = damage
+        self.dmg_min = int(damage * 0.7)  # Minimum damage (70% of base damage)
+        self.dmg_max = int(damage * 1.3)  # Maximum damage (130% of base damage)
+        self.value = value
+        self.tier = tier
+        self.cycle = cycle  # Added cycle attribute
+        self.image = None
+
+    def get_display_name(self):
+        """Returns the weapon name adjusted for the cycle."""
+        if self.cycle == 0:
+            return self.name
+        elif self.cycle == 1:
+            return f"{self.name}+"
+        else:
+            return f"{self.name}+{self.cycle}"
+
+    def load_image(self):
+        """Loads the weapon's image."""
+        assets_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'assets', 'png', 'weapons')
+        image_path = os.path.join(assets_dir, f"{self.name.lower().replace(' ', '_')}.png")
+        if os.path.exists(image_path):
+            return pygame.image.load(image_path).convert_alpha()
+        else:
+            return None
+
+def generate_weapon(tier: str, cycle: int = 0) -> Weapon:
+    """Generates a weapon based on the specified tier."""
+    weapon_lists = {
+        "low": low_tier_weapons,
+        "mid": mid_tier_weapons,
+        "high": high_tier_weapons
+    }
+    tier_stats = {
+        "low": {
+            "damage_range": (3, 6),
+            "value_range": (5, 10)
+        },
+        "mid": {
+            "damage_range": (7, 12),
+            "value_range": (15, 25)
+        },
+        "high": {
+            "damage_range": (13, 20),
+            "value_range": (30, 50)
+        }
+    }
+    weapon_list = weapon_lists.get(tier)
+    stats = tier_stats.get(tier)
+    if not weapon_list or not stats:
+        raise ValueError("Invalid tier for weapon generation")
+
+    # Select a random weapon from the tier's weapon list
+    weapon_template = choice(weapon_list)
+    
+    # Generate damage and value within the tier's range
+    damage = randint(*stats['damage_range'])
+    value = randint(*stats['value_range'])
+    # Scale damage and value with cycle
+    damage = int(damage * (1 + 0.2 * cycle))
+    value = int(value * (1 + 0.2 * cycle))
+    # Adjust weapon name
+    weapon_name = weapon_template.name
+    if cycle == 1:
+        weapon_name += '+'
+    elif cycle > 1:
+        weapon_name += f'+{cycle}'
+    # Create the weapon with the adjusted name
+    return Weapon(
+        name=weapon_name,
+        weapon_type=weapon_template.weapon_type,
+        damage=damage,
+        value=value,
+        tier=tier,
+        cycle=cycle
+    )
+
+# Weapon lists per tier, with Weapon instances containing name and weapon_type
+
+# Low-tier weapons (natural and normal)
+low_tier_weapons_norm = [
+    Weapon(name="Dagger", weapon_type="sharp"),
+    Weapon(name="Club", weapon_type="blunt"),
+    Weapon(name="Short Bow", weapon_type="ranged"),
+    Weapon(name="Fists", weapon_type="blunt"),
+    Weapon(name="Hand Axe", weapon_type="sharp"),
+    Weapon(name="Sling", weapon_type="ranged"),
+    Weapon(name="Hatchet", weapon_type="sharp"),
+    Weapon(name="Wooden Spear", weapon_type="sharp"),
+    Weapon(name="Rusty Sword", weapon_type="sharp"),
+    Weapon(name="Throwing Stone", weapon_type="blunt")
+]
+low_tier_weapons_nat = [
+    Weapon(name="Bounce", weapon_type="natural"),
+    Weapon(name="Tail Whip", weapon_type="natural"),
+    Weapon(name="Bites", weapon_type="natural"),
+    Weapon(name="Tentacle Slap", weapon_type="natural"),
+    Weapon(name="Bone Claws", weapon_type="natural"),
+    Weapon(name="Spiked Carapace", weapon_type="natural"),
+    Weapon(name="Venomous Fangs", weapon_type="natural"),
+    Weapon(name="Corrupted Vine", weapon_type="natural"),
+    Weapon(name="Acidic Touch", weapon_type="natural"),
+    Weapon(name="Ghoul Claws", weapon_type="natural")
+]
+low_tier_weapons = low_tier_weapons_norm + low_tier_weapons_nat
+
+# Mid-tier weapons (natural and normal)
+mid_tier_weapons_norm = [
+    Weapon(name="Iron Sword", weapon_type="sharp"),
+    Weapon(name="Scimitar", weapon_type="sharp"),
+    Weapon(name="Mace", weapon_type="blunt"),
+    Weapon(name="Crossbow", weapon_type="ranged"),
+    Weapon(name="Quarterstaff", weapon_type="blunt"),
+    Weapon(name="Morningstar", weapon_type="blunt"),
+    Weapon(name="Battle Axe", weapon_type="sharp"),
+    Weapon(name="Javelin", weapon_type="sharp"),
+    Weapon(name="Light Crossbow", weapon_type="ranged"),
+    Weapon(name="Flail", weapon_type="blunt")
+]
+mid_tier_weapons_nat = [
+    Weapon(name="Tentacles", weapon_type="natural"),
+    Weapon(name="Claws", weapon_type="natural"),
+    Weapon(name="Stinger", weapon_type="natural"),
+    Weapon(name="Horns", weapon_type="natural"),
+    Weapon(name="Pincer", weapon_type="natural"),
+    Weapon(name="Eldritch Tendril", weapon_type="natural"),
+    Weapon(name="Shadow Bite", weapon_type="natural"),
+    Weapon(name="Crawling Chaos Spikes", weapon_type="natural"),
+    Weapon(name="Cursed Vine", weapon_type="natural"),
+    Weapon(name="Ravenous Maw", weapon_type="natural")
+]
+mid_tier_weapons = mid_tier_weapons_norm + mid_tier_weapons_nat
+
+# High-tier weapons (natural and normal)
+high_tier_weapons_norm = [
+    Weapon(name="Long Sword", weapon_type="sharp"),
+    Weapon(name="Warhammer", weapon_type="blunt"),
+    Weapon(name="Great Hammer", weapon_type="blunt"),
+    Weapon(name="Rapier", weapon_type="sharp"),
+    Weapon(name="Halberd", weapon_type="sharp"),
+    Weapon(name="Heavy Crossbow", weapon_type="ranged"),
+    Weapon(name="Double Axe", weapon_type="sharp"),
+    Weapon(name="Maul", weapon_type="blunt"),
+    Weapon(name="Trident", weapon_type="sharp"),
+    Weapon(name="Spiked Chain", weapon_type="blunt")
+]
+high_tier_weapons_nat = [
+    Weapon(name="Acid Spit", weapon_type="natural"),
+    Weapon(name="Tail Slam", weapon_type="natural"),
+    Weapon(name="Fire Breath", weapon_type="natural"),
+    Weapon(name="Necrotic Touch", weapon_type="natural"),
+    Weapon(name="Shadow Tentacle", weapon_type="natural"),
+    Weapon(name="Eldritch Claw", weapon_type="natural"),
+    Weapon(name="Void Strike", weapon_type="natural"),
+    Weapon(name="Chaos Bite", weapon_type="natural"),
+    Weapon(name="Spectral Fang", weapon_type="natural"),
+    Weapon(name="Abyssal Spines", weapon_type="natural")
+]
+high_tier_weapons = high_tier_weapons_norm + high_tier_weapons_nat
+
+        ->item: 
+
+
+
+# battle_system/item.py
+
+import pygame
+import os
+
+class Item:
+    """Base class for all items."""
+
+    def __init__(self, name: str, description: str, tier: str, value: int):
+        self.name = name
+        self.description = description
+        self.tier = tier
+        self.value = value
+        self.image = self.load_image()
+
+    def use(self, target):
+        """Defines what happens when the item is used."""
+        pass
+
+    def load_image(self):
+        """Loads the item's image."""
+        assets_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'assets', 'png', 'items')
+        image_path = os.path.join(assets_dir, f"{self.name.lower().replace(' ', '_')}.png")
+        if os.path.exists(image_path):
+            return pygame.image.load(image_path).convert_alpha()
+        else:
+            # Return a default image or None
+            return None
+
+
+class Cure(Item):
+    """Cure items that heal the target."""
+
+    heal_percentages = {
+        "small": 15,
+        "mids": 30,
+        "midh": 50,
+        "large": 70,
+        "superior": 100
+    }
+
+    def __init__(self, name: str, description: str, tier: str, value: int):
+        super().__init__(name, description, tier, value)
+        self.heal_percent = self.heal_percentages.get(tier, 0)
+
+    def use(self, target):
+        """Heals the target by a percentage of their max health."""
+        heal_amount = int(target.health_max * self.heal_percent / 100)
+        target.health = min(target.health + heal_amount, target.health_max)
+        target.health_bar.update()
+        print(f"{target.name} used {self.name} and healed {heal_amount} HP!")
+
+
+class Throwable(Item):
+    """Throwable items that deal damage to the enemy."""
+
+    def __init__(self, name: str, description: str, tier: str, value: int, damage: int):
+        super().__init__(name, description, tier, value)
+        self.damage = damage
+
+    def use(self, target):
+        """Deals damage to the target."""
+        target.take_damage(self.damage)
+        print(f"{target.name} took {self.damage} damage from {self.name}!")
+
+
+def generate_cure(tier: str) -> Cure:
+    """Generates a cure item based on the tier."""
+    cure_names = {
+        "small": "Small Health Potion",
+        "mids": "Medium Health Potion",
+        "midh": "Strong Health Potion",
+        "large": "Large Health Potion",
+        "superior": "Superior Health Potion"
+    }
+    name = cure_names.get(tier, "Unknown Potion")
+    description = f"Heals {Cure.heal_percentages.get(tier, 0)}% of max health."
+    value = {
+        "small": 10,
+        "mids": 20,
+        "midh": 35,
+        "large": 50,
+        "superior": 75
+    }.get(tier, 0)
+    return Cure(name, description, tier, value)
+
+
+def generate_throwable(tier: str) -> Throwable:
+    """Generates a throwable item based on the tier."""
+    throwable_names = {
+        "small": "Throwing Knife",
+        "mids": "Bomb",
+        "midh": "Fire Flask",
+        "large": "Poison Dart",
+        "superior": "Explosive Charge"
+    }
+    name = throwable_names.get(tier, "Unknown Throwable")
+    description = "Deals damage to an enemy."
+    damage = {
+        "small": 10,
+        "mids": 20,
+        "midh": 35,
+        "large": 50,
+        "superior": 75
+    }.get(tier, 0)
+    value = damage  # For simplicity, value equals damage
+    return Throwable(name, description, tier, value, damage)    
+
+def create_item_from_name(name):
+    """Creates an item instance based on the item name."""
+    # Map item names to generated items
+    name_to_item = {
+        # Cures
+        "Small Health Potion": generate_cure("small"),
+        "Medium Health Potion": generate_cure("mids"),
+        "Strong Health Potion": generate_cure("midh"),
+        "Large Health Potion": generate_cure("large"),
+        "Superior Health Potion": generate_cure("superior"),
+        # Throwables
+        "Throwing Knife": generate_throwable("small"),
+        "Bomb": generate_throwable("mids"),
+        "Fire Flask": generate_throwable("midh"),
+        "Poison Dart": generate_throwable("large"),
+        "Explosive Charge": generate_throwable("superior"),
+        # Add more items as needed
+    }
+    return name_to_item.get(name)
+
+        ->healthbar:
+
+# battle_system/health_bar.py
+
+import pygame
+
+class HealthBar:
+    """Class to represent a health bar for characters."""
+
+    def __init__(self, entity, width: int = 200, height: int = 20, color=(0, 255, 0)):
+        self.entity = entity
+        self.width = width
+        self.height = height
+        self.color = color
+
+    def update(self) -> None:
+        """Updates the health bar based on the entity's current health."""
+        pass  # No additional data to update
+
+    def draw(self, screen, position):
+        """Draws the health bar on the screen at the given position."""
+        health_ratio = self.entity.health / self.entity.health_max
+        pygame.draw.rect(screen, (255, 0, 0), (*position, self.width, self.height))  # Background (red)
+        pygame.draw.rect(screen, self.color, (*position, self.width * health_ratio, self.height))  # Health (green)
+        # Draw border
+        pygame.draw.rect(screen, (255, 255, 255), (*position, self.width, self.height), 2)
+
+    }
+    -->map_system{       
+
+        ->map:
+
+# map_system/map.py
+
+import sys
+import os
+
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+import random
+from collections import Counter
+from random import randint
+
+from map_system.tiles import *
+from battle_system.enemy import generate_enemy
+
+class Map:
+    """Class to represent the game map."""
+    TILE_SIZE = 16
+
+    def __init__(self, screen: pygame.Surface, width: int, height: int, seed: int = None):
+        self.width = width
+        self.height = height
+        self.screen = screen
+
+        # Confirm that self.screen is a Surface
+        assert isinstance(self.screen, pygame.Surface), "screen should be a Pygame Surface"
+
+        self.seed = seed if seed is not None else random.randint(0, 1000000)
+        random.seed(self.seed)
+
+        self.map_data = [[default for _ in range(self.width)] for _ in range(self.height)]
+        self.enemies = []
+        self.boss_spawned = False
+        self.player_pos = (1, 1)
+        self.player_previous_tile = self.map_data[self.player_pos[0]][self.player_pos[1]]
+
+        self.create_frame()
+        self.fill_default()
+        self.generate_biomes_and_patches()
+        self.generate_rivers()
+        self.place_structures_optimized()
+
+
+    @classmethod
+    def generate_map_with_seed(cls, width: int, height: int, seed: int):
+        """Generates a map with a specific seed value."""
+        return cls(width, height, seed)
+    
+    def draw(self, screen):
+        """Draws the map on the given screen."""
+        for x in range(self.height):
+            for y in range(self.width):
+                tile = self.map_data[x][y]
+                if tile.image:
+                    # Draw each tile image on the screen
+                    self.screen.blit(tile.image, (y * self.TILE_SIZE, x * self.TILE_SIZE))
+        
+        # Draw enemies
+        for enemy in self.enemies:
+            if enemy.image:
+                self.screen.blit(enemy.image, (enemy.pos[1] * self.TILE_SIZE, enemy.pos[0] * self.TILE_SIZE))
+
+    def reset_map(self, seed):
+        """Resets the map with the provided seed without reinitializing the object."""
+        print(f"Resetting map with seed {seed}...")
+        random.seed(seed)
+
+        # Clear existing map data
+        self.map_data = [[default for _ in range(self.width)] for _ in range(self.height)]
+        self.enemies = []
+        self.boss_spawned = False
+        self.player_pos = (1, 1)
+        self.player_previous_tile = self.map_data[self.player_pos[0]][self.player_pos[1]]
+
+        # Regenerate map structures, biomes, rivers, and other elements
+        self.create_frame()
+        self.fill_default()
+        self.generate_biomes_and_patches()
+        self.generate_rivers()
+        self.place_structures_optimized()
+
+    def place_player(self, hero=None):
+        """Places the player on the map, making sure only one instance exists."""
+        if hero is None:
+            x, y = self.player_pos
+            self.map_data[x][y] = player
+
+    def refill_tile(self, x: int, y: int):
+        # Logic to refill the tile previously occupied by the player or an enemy
+        adjacent_tiles = []
+
+        # Loop to gather adjacent tile types
+        for i in range(max(0, x - 1), min(self.height, x + 2)):
+            for j in range(max(0, y - 1), min(self.width, y + 2)):
+                if (i, j) != (x, y):  # Exclude the current position
+                    if self.map_data[i][j] is not None:
+                        adjacent_tiles.append(self.map_data[i][j])
+
+        # Find the most common adjacent tile to determine what tile should replace the player's old position
+        if adjacent_tiles:
+            tile_counts = Counter([tile.symbol_raw for tile in adjacent_tiles])
+            most_common_tile_symbol = tile_counts.most_common(1)[0][0]
+
+            # Set the tile object back based on the symbol
+            for tile in [plains, forest, mountain, brush, default]:
+                if tile.symbol_raw == most_common_tile_symbol:
+                    return tile
+
+        # If no adjacent tile or in case of error, return the default tile
+        return default
+
+    def create_frame(self):
+        """Creates a boundary frame around the map."""
+        for x in range(self.width):
+            self.map_data[0][x] = self.map_data[self.height - 1][x] = Tile("=", "=", "grey", walkable=False)
+        for y in range(self.height):
+            self.map_data[y][0] = self.map_data[y][self.width - 1] = Tile("=", "=", "grey", walkable=False)
+
+    def fill_default(self):
+        """Fills the internal part of the map with default tiles."""
+        for x in range(1, self.height - 1):
+            for y in range(1, self.width - 1):
+                self.map_data[x][y] = default
+
+    def generate_biomes_and_patches(self):
+        """Generates biome patches in large blocks to reduce redundant random calls."""
+        biome_types = [
+            (plains, 40, 10, 20),   # Increased patch count and size
+            (forest, 30, 8, 15),
+            (mountain, 20, 6, 12),
+            (lake, 15, 6, 10),
+            (brush, 20, 5, 12),
+            (desert, 15, 5, 12),
+            (swamp, 10, 5, 10),
+            (snow, 10, 5, 10),
+            (hill, 15, 5, 12)
+        ]
+        for tile, num_patches, min_size, max_size in biome_types:
+            self.generate_patch_optimized(tile, num_patches, min_size, max_size)
+
+    def generate_patch_optimized(self, tile, num_patches, min_size, max_size):
+        """Generates patches with optimized approach."""
+        for _ in range(num_patches):
+            x, y = random.randint(1, self.height - 2), random.randint(1, self.width - 2)
+            patch_size = random.randint(min_size, max_size)
+            directions = [(0, 1), (1, 0), (0, -1), (-1, 0)]
+            for _ in range(patch_size):
+                dx, dy = random.choice(directions)
+                x, y = min(max(1, x + dx), self.height - 2), min(max(1, y + dy), self.width - 2)
+                if self.map_data[x][y] == default:
+                    self.map_data[x][y] = tile
+
+    def generate_rivers(self, num_rivers=3):
+        """Generates rivers using an optimized approach."""
+        for _ in range(num_rivers):
+            x, y = random.randint(1, self.height - 2), random.randint(1, self.width - 2)
+            while self.map_data[x][y] != mountain:
+                x, y = random.randint(1, self.height - 2), random.randint(1, self.width - 2)
+            length = random.randint(10, 20)
+            for _ in range(length):
+                self.map_data[x][y] = river
+                dx, dy = random.choice([(0, 1), (1, 0), (0, -1), (-1, 0)])
+                x, y = min(max(1, x + dx), self.height - 2), min(max(1, y + dy), self.width - 2)
+
+    def place_structures_optimized(self):
+        """Places structures with reduced random retries."""
+        structure_params = [
+            (village, default, 2, "Village"),
+            (cave, mountain, 3, "Cave"),
+            (ruins, plains, 2, "Ruins"),
+            (shrine_tile, plains, 1, "Shrine"),
+            (treasure, forest, 3, "Treasure"),
+        ]
+        for tile, target_tile, count, name in structure_params:
+            self.place_structure(tile, target_tile, count, name)
+
+    def place_structure(self, structure_tile, target_tile_type, count, name):
+        """Optimized structure placement with limited attempts."""
+        placed_count = 0
+        attempts = 0
+        max_attempts = 100
+        while placed_count < count and attempts < max_attempts:
+            x, y = random.randint(1, self.height - 2), random.randint(1, self.width - 2)
+            if self.map_data[x][y] == target_tile_type:
+                self.map_data[x][y] = structure_tile
+                placed_count += 1
+                print(f"{name} {placed_count} placed at ({x}, {y}) after {attempts + 1} attempts.")
+            attempts += 1
+        if placed_count < count:
+            print(f"Failed to place all {name}s after {max_attempts} attempts.")
+
+    def update_player_position(self, old_x, old_y, new_x, new_y):
+        """Updates the player's position on the map."""
+        self.map_data[old_x, old_y] = self.player_previous_tile
+        self.player_previous_tile = self.map_data[new_x, new_y]
+        self.map_data[new_x, new_y] = player
+        self.player_pos = (new_x, new_y)
+
+    def display_map(self):
+        """Displays the map visually using Pygame."""
+        self.screen.fill((0, 0, 0))  # Clear the screen with black
+
+        # Calculate map pixel dimensions
+        map_pixel_width = self.width * self.TILE_SIZE
+        map_pixel_height = self.height * self.TILE_SIZE
+
+        # Draw each tile on the map
+        for row_idx, row in enumerate(self.map_data):
+            for col_idx, tile in enumerate(row):
+                if tile.image:
+                    # Draw the tile image
+                    self.screen.blit(tile.image, (col_idx * self.TILE_SIZE, row_idx * self.TILE_SIZE))
+
+        # Draw each enemy on top of the map
+        for enemy in self.enemies:
+            if enemy.image:
+                x, y = enemy.pos
+                self.screen.blit(enemy.image, (y * self.TILE_SIZE, x * self.TILE_SIZE))
+
+        # Draw the player on the map on top of everything else
+        player_tile = self.map_data[self.player_pos[0]][self.player_pos[1]]
+        if player_tile.image:
+            self.screen.blit(player.image, (self.player_pos[1] * self.TILE_SIZE, self.player_pos[0] * self.TILE_SIZE))
+
+        # Draw grid lines only within the map bounds
+        for x in range(0, map_pixel_width, self.TILE_SIZE):
+            pygame.draw.line(self.screen, (0, 0, 0), (x, 0), (x, map_pixel_height), 1)  # Vertical lines
+        for y in range(0, map_pixel_height, self.TILE_SIZE):
+            pygame.draw.line(self.screen, (0, 0, 0), (0, y), (map_pixel_width, y), 1)  # Horizontal lines
+
+    def enclose_map(self):
+        """Enclose the map with non-walkable boundary tiles."""
+        for x in range(self.width):
+            self.map_data[0][x] = Tile("X", ansi_colors['gray'], walkable=False)  # Top boundary
+            self.map_data[self.height - 1][x] = Tile("X", ansi_colors['gray'], walkable=False)  # Bottom boundary
+        for y in range(self.height):
+            self.map_data[y][0] = Tile("X", ansi_colors['gray'], walkable=False)  # Left boundary
+            self.map_data[y][self.width - 1] = Tile("X", ansi_colors['gray'], walkable=False)  # Right boundary
+
+    def clear_screen(self):
+        """Clears the console screen."""
+        os.system("cls" if os.name == "nt" else "clear")
+
+    def update_player_position(self, old_x, old_y, new_x, new_y):
+        """Updates the player's position on the map."""
+        self.map_data[old_x][old_y] = self.player_previous_tile  # Restore the tile under the player
+        # Save the underlying tile before moving the player
+        self.player_previous_tile = self.map_data[new_x][new_y]
+        
+        self.map_data[new_x][new_y] = player
+        self.player_pos = (new_x, new_y)
+
+    def select_enemies(self, boss_defeated, cycle):
+        """Selects a list of enemies to place on the map."""
+        level_multiplier = 1 + (boss_defeated * 0.2) + (cycle * 0.2)
+        enemies_list = []
+        for _ in range(5):
+            enemy = generate_enemy("low", cycle)
+            enemy.scale_stats(level_multiplier)
+            enemies_list.append(enemy)
+        for _ in range(3):
+            enemy = generate_enemy("mid", cycle)
+            enemy.scale_stats(level_multiplier)
+            enemies_list.append(enemy)
+        for _ in range(2):
+            enemy = generate_enemy("high", cycle)
+            enemy.scale_stats(level_multiplier)
+            enemies_list.append(enemy)
+        return enemies_list
+
+    def clear_map(self):
+        """Clears the current map."""
+        self.map_data = [[default for _ in range(self.width)] for _ in range(self.height)]
+        self.create_frame()
+        self.fill_default()
+        self.generate_patches()
+        self.place_structures()
+        self.enemies = []
+        self.boss_spawned = False
+
+    def is_tile_empty(self, x, y):
+        """Check if a tile is empty and suitable for enemy placement."""
+        tile = self.map_data[x][y]
+        # A tile is empty if it's walkable and not occupied by 'E' or 'P'
+        return tile.walkable and tile.symbol_raw not in ['P'] and tile.enemy is None
+
+    def count_available_tiles(self):
+        """Counts the number of available tiles for enemy placement."""
+        count = 0
+        for x in range(1, self.height - 1):
+            for y in range(1, self.width - 1):
+                if self.is_tile_empty(x, y):
+                    count += 1
+        return count
+    
+    def calculate_map_density(self):
+        """Calculates the number of walkable and occupied tiles."""
+        walkable_tiles = 0
+        occupied_tiles = 0
+        for row in self.map_data:
+            for tile in row:
+                if tile.walkable:
+                    walkable_tiles += 1
+                    # Count the number of occupied tiles (by structures or enemies)
+                    if tile.enemy or tile == village or tile == cave or tile == ruins:
+                        occupied_tiles += 1
+
+    def place_enemies_on_map(self, enemies_list):
+        """Places enemies on the map."""
+
+        for idx, enemy in enumerate(enemies_list):
+            placed = False
+            attempts = 0
+
+            while not placed:
+                x = random.randint(1, self.height - 2)
+                y = random.randint(1, self.width - 2)
+                attempts += 1
+
+                # Check if the tile is suitable for placing an enemy
+                if self.is_tile_empty(x, y):
+                    # Place enemy on the tile
+                    enemy.pos = (x, y)
+                    enemy.underlying_tile = self.map_data[x][y]  # Store the underlying tile
+                    self.enemies.append(enemy)
+                    placed = True
+                elif attempts > 200:  # Fail-safe after 200 attempts
+                    break
+
+
+    def place_boss(self):
+        """Places the boss on the map after other structures and enemies are placed."""
+        attempts = 0
+        max_attempts = 100
+        while attempts < max_attempts:
+            x = random.randint(1, self.height - 2)
+            y = random.randint(1, self.width - 2)
+
+            # Check that the boss tile is a walkable tile and not overlapping with other encounters or structures
+            if self.is_tile_empty(x, y) and self.map_data[x][y].walkable:
+                self.map_data[x][y] = boss_tile
+                print(f"Boss placed at ({x}, {y}) after {attempts + 1} attempts.")
+                return (x, y)
+            attempts += 1
+
+        print(f"Failed to place Boss after {max_attempts} attempts.")
+
+    def swap_for_shrine(self, x, y):
+        """Swaps the defeated boss tile with a shrine tile."""
+        self.map_data[x][y] = shrine_tile
+        print(f"Shrine placed at ({x}, {y}) after boss defeated.")
+
+        ->tiles:
+
+# map_system/tiles.py
+
+import pygame
+import os
+
+# ANSI escape sequences for colors
+ansi_colors = {
+    'reset': '\033[0m',
+    'black': '\033[30m',
+    'red': '\033[31m',
+    'green': '\033[32m',
+    'yellow': '\033[33m',
+    'blue': '\033[34m',
+    'magenta': '\033[35m',
+    'cyan': '\033[36m',
+    'white': '\033[37m',
+    'bright_black': '\033[90m',
+    'bright_red': '\033[91m',
+    'bright_green': '\033[92m',
+    'bright_yellow': '\033[93m',
+    'bright_blue': '\033[94m',
+    'bright_magenta': '\033[95m',
+    'bright_cyan': '\033[96m',
+    'bright_white': '\033[97m',
+}
+
+class Tile:
+    """Class to represent a map tile."""
+
+    tile_types = set()
+
+    def __init__(self, name: str, symbol: str, color: str, colored: bool = True, walkable: bool = True, visited=False):
+        self.name = name  # Name used for loading the image (should match the filename)
+        self.symbol_raw = symbol
+        self.symbol = f"{color}{symbol}{ansi_colors['reset']}" if colored else symbol
+        self.walkable = walkable  # Indicates if the tile can be walked on or have enemies
+        self.visited = visited    # For tiles like villages that can be visited
+        self.image = None 
+        self.enemy = None 
+        Tile.tile_types.add(name)
+
+def load_image(image_name):
+    """Loads an image from the assets/png directory."""
+    base_path = os.path.dirname(os.path.dirname(__file__))  # Get the project root directory
+    image_path = os.path.join(base_path, 'assets', 'png', f"{image_name}.png")
+    if os.path.exists(image_path):
+        return pygame.image.load(image_path)  # Load without conversion
+    else:
+        # Handle missing image file
+        print(f"Warning: Image file {image_path} not found.")
+        placeholder = pygame.Surface((32, 32))
+        placeholder.fill((255, 0, 255))  # Magenta color to indicate missing texture
+        return placeholder
+
+def load_tile_images():
+    """Loads images for all tiles."""
+    # Ensure Pygame is initialized before calling this function
+    base_path = os.path.dirname(os.path.dirname(__file__))  # Get the project root directory
+    assets_dir = os.path.join(base_path, 'assets', 'png')
+
+    for tile in [plains, forest, brush, mountain, water, lake, desert, swamp, snow, hill, river, beach, cave, ruins, shrine_tile, boss_tile, default, player, village, treasure]:
+        image_path = os.path.join(assets_dir, f"{tile.name}.png")
+        if os.path.exists(image_path):
+            tile.image = pygame.image.load(image_path).convert_alpha()
+        else:
+            # Handle missing image file
+            print(f"Warning: Image file {image_path} not found.")
+            placeholder = pygame.Surface((32, 32))
+            placeholder.fill((255, 0, 255))  # Magenta color to indicate missing texture
+            tile.image = placeholder
+
+enemy_images = {}
+
+def load_enemy_images():
+    """Loads images for enemies."""
+    assets_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'assets', 'png')
+    for tier in ['low', 'mid', 'high']:
+        image_path = os.path.join(assets_dir, f"{tier}_enemy.png")
+        if os.path.exists(image_path):
+            enemy_images[tier] = pygame.image.load(image_path).convert_alpha()
+        else:
+            print(f"Warning: Enemy image {image_path} not found.")
+            placeholder = pygame.Surface((32, 32))
+            placeholder.fill((255, 0, 0))  # Red color for missing image
+            enemy_images[tier] = placeholder
+
+# Load images for tiles
+tile_images = {
+    "plains": load_image("plains"),
+    "forest": load_image("forest"),
+    "brush": load_image("brush"),
+    "mountain": load_image("mountain"),
+    "water": load_image("water"),
+    "lake": load_image("lake"),
+    "desert": load_image("desert"),
+    "swamp": load_image("swamp"),
+    "snow": load_image("snow"),
+    "hill": load_image("hill"),
+    "river": load_image("river"),
+    "beach": load_image("beach"),
+    "cave": load_image("cave"),
+    "ruins": load_image("ruins"),
+    "shrine": load_image("shrine"),
+    "boss": load_image("boss"),
+    "default": load_image("default"),
+    "player": load_image("player"),
+    "village": load_image("village"),
+    "treasure": load_image("treasure"),
+}
+
+# Define tiles with names matching their image filenames
+plains = Tile("plains", ";", ansi_colors.get('yellow', ''), walkable=True)
+forest = Tile("forest", "8", ansi_colors.get('green', ''), walkable=True)
+brush = Tile("brush", "^", ansi_colors.get('magenta', ''), walkable=True)
+mountain = Tile("mountain", "A", ansi_colors.get('white', ''), walkable=True)
+water = Tile("water", "~", ansi_colors.get('blue', ''), walkable=False)
+lake = Tile("lake", "§", ansi_colors.get('cyan', ''), walkable=False)
+desert = Tile("desert", ".", ansi_colors.get('bright_yellow', ''), walkable=True)
+swamp = Tile("swamp", "&", ansi_colors.get('bright_green', ''), walkable=True)
+snow = Tile("snow", "*", ansi_colors.get('bright_white', ''), walkable=True)
+hill = Tile("hill", "m", ansi_colors.get('bright_magenta', ''), walkable=True)
+river = Tile("river", "≈", ansi_colors.get('bright_blue', ''), walkable=False)
+beach = Tile("beach", "_", ansi_colors.get('yellow', ''), walkable=True)
+cave = Tile("cave", "C", ansi_colors.get('bright_black', ''), walkable=True)
+ruins = Tile("ruins", "R", ansi_colors.get('red', ''), walkable=True)
+shrine_tile = Tile("shrine", "S", ansi_colors.get('bright_magenta', ''), walkable=False)
+boss_tile = Tile("boss", "B", ansi_colors.get('bright_red', ''), walkable=False)
+default = Tile("default", "#", ansi_colors.get('black', ''), walkable=True)
+player = Tile("player", "P", ansi_colors.get('green', ''), walkable=False)
+village = Tile("village", "V", ansi_colors.get('green', ''), walkable=False, visited=False)
+treasure = Tile("treasure", "T", ansi_colors.get('yellow', ''), walkable=False)
+treasure_empty = Tile("treasure_empty", "t", ansi_colors.get('yellow', ''), walkable=True)
+
+# Assign images to tiles
+plains.image = tile_images["plains"]
+forest.image = tile_images["forest"]
+brush.image = tile_images["brush"]
+mountain.image = tile_images["mountain"]
+water.image = tile_images["water"]
+lake.image = tile_images["lake"]
+desert.image = tile_images["desert"]
+swamp.image = tile_images["swamp"]
+snow.image = tile_images["snow"]
+hill.image = tile_images["hill"]
+river.image = tile_images["river"]
+beach.image = tile_images["beach"]
+cave.image = tile_images["cave"]
+ruins.image = tile_images["ruins"]
+shrine_tile.image = tile_images["shrine"]
+boss_tile.image = tile_images["boss"]
+default.image = tile_images["default"]
+player.image = tile_images["player"]
+village.image = tile_images["village"]
+treasure.image = tile_images["treasure"]
+treasure_empty.image = load_image("treasure_empty")
+
+    }
+
+}
