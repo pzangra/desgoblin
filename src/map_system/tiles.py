@@ -40,9 +40,11 @@ class Tile:
         Tile.tile_types.add(name)
 
 def load_image(image_name):
-    """Loads an image from the assets/png directory."""
-    base_path = os.path.dirname(os.path.dirname(__file__))  # Get the project root directory
-    image_path = os.path.join(base_path, 'assets', 'png', f"{image_name}.png")
+    """Loads an image from the assets directory."""
+    # Go up three levels: map_system -> src -> root
+    project_root = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
+    # Look directly in 'assets', removing the 'png' subfolder
+    image_path = os.path.join(project_root, 'assets', f"{image_name}.png")
     if os.path.exists(image_path):
         return pygame.image.load(image_path)  # Load without conversion
     else:
@@ -55,8 +57,8 @@ def load_image(image_name):
 def load_tile_images():
     """Loads images for all tiles."""
     # Ensure Pygame is initialized before calling this function
-    base_path = os.path.dirname(os.path.dirname(__file__))  # Get the project root directory
-    assets_dir = os.path.join(base_path, 'assets', 'png')
+    project_root = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
+    assets_dir = os.path.join(project_root, 'assets')
 
     for tile in [plains, forest, brush, mountain, water, lake, desert, swamp, snow, hill, river, beach, cave, ruins, shrine_tile, boss_tile, default, player, village, treasure]:
         image_path = os.path.join(assets_dir, f"{tile.name}.png")
@@ -73,7 +75,9 @@ enemy_images = {}
 
 def load_enemy_images():
     """Loads images for enemies."""
-    assets_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'assets', 'png')
+    project_root = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
+    assets_dir = os.path.join(project_root, 'assets')
+
     for tier in ['low', 'mid', 'high']:
         image_path = os.path.join(assets_dir, f"{tier}_enemy.png")
         if os.path.exists(image_path):
