@@ -1,9 +1,2 @@
 pygame
-os
-sys
-random
-collections
-typing
-abs
-time
 keyboard
