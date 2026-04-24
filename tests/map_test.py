@@ -6,7 +6,7 @@ import os
 import pygame
 import random as rand
 
-from map import Map
+from map_system.map import Map
 from tiles import load_tile_images
 from battle_system.enemy import generate_enemy
 
