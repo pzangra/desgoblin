@@ -7,7 +7,7 @@ import pygame
 import random as rand
 
 from map_system.map import Map
-from tiles import load_tile_images
+from map_system.tiles import load_tile_images
 from battle_system.enemy import generate_enemy
 
 # Adding the root directory to the system path to access assets and other files
